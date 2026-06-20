@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ENV_FILE="/root/setup-data/env.txt"
-HASH_FILE="/root/setup-data/password.hash"
-
 log() {
   echo "[+] $*"
 }
@@ -30,11 +27,6 @@ require_root() {
   [[ "${EUID}" -eq 0 ]] || die "Run this script as root"
 }
 
-require_file() {
-  local f="$1"
-  [[ -f "$f" ]] || die "Required file not found: $f"
-}
-
 set_sshd_option() {
   local key="$1"
   local value="$2"
@@ -47,37 +39,91 @@ set_sshd_option() {
   fi
 }
 
-require_root
-require_file "$ENV_FILE"
-require_file "$HASH_FILE"
-
-log "Loading config from $ENV_FILE"
-set -a
-source "$ENV_FILE"
-set +a
-
-NEW_USERNAME="$(strip_cr "${NEW_USERNAME:-}")"
-SSH_PORT="$(strip_cr "${SSH_PORT:-}")"
-SERVER_IP="$(strip_cr "${SERVER_IP:-}")"
-
-EXTERNAL_IP=$(curl -s -4 --max-time 10 ipv4.icanhazip.com || curl -s -4 --max-time 10 ifconfig.me || echo "")
-if [[ -n "$EXTERNAL_IP" ]]; then
-  if grep -q "^SERVER_IP=" "$ENV_FILE"; then
-    sed -i "s/^SERVER_IP=.*/SERVER_IP=${EXTERNAL_IP}/" "$ENV_FILE"
+prompt_input() {
+  local prompt="$1"
+  local default="$2"
+  local input=""
+  
+  if [[ -n "$default" ]]; then
+    read -p "$prompt [$default]: " input
+    echo "${input:-$default}"
   else
-    echo "SERVER_IP=${EXTERNAL_IP}" >> "$ENV_FILE"
+    while [[ -z "$input" ]]; do
+      read -p "$prompt: " input
+    done
+    echo "$input"
   fi
+}
+
+prompt_password() {
+  local prompt="$1"
+  local password=""
+  local password_confirm=""
+  
+  while true; do
+    read -s -p "$prompt: " password
+    echo
+    read -s -p "Confirm password: " password_confirm
+    echo
+    
+    if [[ "$password" == "$password_confirm" ]]; then
+      echo "$password"
+      return 0
+    else
+      warn "Passwords do not match. Try again."
+    fi
+  done
+}
+
+require_root
+
+echo "========================================"
+echo "Server Preparation Script"
+echo "========================================"
+echo
+
+# Get user input
+log "Please provide the following information:"
+echo
+
+NEW_USERNAME=$(prompt_input "New username for SSH access" "deploy")
+NEW_USERNAME="$(strip_cr "$NEW_USERNAME")"
+
+SSH_PORT=$(prompt_input "SSH port" "2091")
+SSH_PORT="$(strip_cr "$SSH_PORT")"
+
+SERVER_IP=$(prompt_input "Server IP (optional)" "")
+SERVER_IP="$(strip_cr "$SERVER_IP")"
+
+NEW_PASSWORD=$(prompt_password "Password for $NEW_USERNAME")
+NEW_PASSWORD="$(strip_cr "$NEW_PASSWORD")"
+
+echo
+log "Configuration:"
+echo "  Username: $NEW_USERNAME"
+echo "  SSH Port: $SSH_PORT"
+echo "  Server IP: ${SERVER_IP:-(will be detected)}"
+echo
+
+read -p "Continue with this configuration? (y/N): " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+  die "Aborted by user"
+fi
+
+# Validate inputs
+: "${NEW_USERNAME:?Missing NEW_USERNAME}"
+: "${SSH_PORT:=2091}"
+: "${NEW_PASSWORD:?Missing password}"
+
+# Detect external IP
+EXTERNAL_IP=$(curl -s -4 --max-time 10 ipv4.icanhazip.com 2>/dev/null || curl -s -4 --max-time 10 ifconfig.me 2>/dev/null || echo "")
+if [[ -n "$EXTERNAL_IP" ]]; then
   log "External IP detected: ${EXTERNAL_IP}"
 else
   EXTERNAL_IP="${SERVER_IP:-$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)}"
-  warn "Could not detect external IP; falling back to ${EXTERNAL_IP}"
+  warn "Could not detect external IP; using: ${EXTERNAL_IP}"
 fi
-
-NEW_PASSWORD_HASH="$(tr -d '\r\n' < "$HASH_FILE")"
-
-: "${NEW_USERNAME:?Missing NEW_USERNAME in $ENV_FILE}"
-: "${SSH_PORT:=2091}"
-: "${NEW_PASSWORD_HASH:?Missing password hash in $HASH_FILE}"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -92,8 +138,8 @@ else
   useradd -m -s /bin/bash "$NEW_USERNAME"
 fi
 
-log "Setting password hash for $NEW_USERNAME"
-echo "${NEW_USERNAME}:${NEW_PASSWORD_HASH}" | chpasswd -e
+log "Setting password for $NEW_USERNAME"
+echo "${NEW_USERNAME}:${NEW_PASSWORD}" | chpasswd
 
 log "Adding $NEW_USERNAME to sudo group"
 usermod -aG sudo "$NEW_USERNAME"
@@ -175,8 +221,6 @@ fi
 log "Final checks"
 fail2ban-client status sshd || warn "fail2ban sshd status check failed"
 ufw status verbose || warn "ufw status check failed"
-
-cp "$ENV_FILE" "/home/$NEW_USERNAME/env.txt"
 
 echo
 echo "Done."
