@@ -139,7 +139,7 @@ else
 fi
 
 log "Setting password for $NEW_USERNAME"
-echo "${NEW_USERNAME}:${NEW_PASSWORD}" | chpasswd
+printf '%s:%s\n' "$NEW_USERNAME" "$NEW_PASSWORD" | chpasswd
 
 log "Adding $NEW_USERNAME to sudo group"
 usermod -aG sudo "$NEW_USERNAME"
